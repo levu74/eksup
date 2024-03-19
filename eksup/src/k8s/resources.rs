@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use k8s_openapi::api::{
   apps, batch,
-  core::{self, v1::PodTemplateSpec},
+  core::{self, v1::{Namespace, PodTemplateSpec}},
   policy,
 };
 use kube::{api::Api, Client, CustomResource};
@@ -152,46 +152,66 @@ async fn get_deployments(client: &Client) -> Result<Vec<StdResource>> {
 }
 
 async fn get_replicasets(client: &Client) -> Result<Vec<StdResource>> {
-  let api: Api<apps::v1::ReplicaSet> = Api::all(client.to_owned());
-  let replicaset_list = api
+  
+  
+
+  // get all namespaces
+  let namespace_api: Api<Namespace> = Api::all(client.to_owned());
+  let namespaces: Vec<String> = namespace_api
     .list(&Default::default())
     .await
-    .context("Failed to list ReplicaSets")?;
-
-  let replicasets = replicaset_list
-    .items
+    .context("Failed to list namespaces")?
     .iter()
-    .filter_map(|repl| match repl.metadata.owner_references {
-      None => {
-        let objmeta = repl.metadata.clone();
-
-        let metadata = StdMetadata {
-          name: objmeta.name.unwrap_or_default(),
-          namespace: objmeta.namespace.unwrap_or_default(),
-          kind: Kind::ReplicaSet,
-          labels: objmeta.labels.unwrap_or_default(),
-          annotations: objmeta.annotations.unwrap_or_default(),
-        };
-        let spec = match &repl.spec {
-          Some(spec) => StdSpec {
-            min_ready_seconds: spec.min_ready_seconds,
-            replicas: spec.replicas,
-            template: spec.template.clone(),
-          },
-          None => StdSpec {
-            min_ready_seconds: None,
-            replicas: None,
-            template: None,
-          },
-        };
-
-        Some(StdResource { metadata, spec })
-      }
-      Some(_) => None,
-    })
+    .map(|ns| ns.metadata.name.clone().unwrap_or_default())
     .collect();
 
-  Ok(replicasets)
+  let mut all_replicasets: Vec<StdResource> = Vec::new();
+
+  // for each namespace, get the replica sets
+  for ns in namespaces {
+    let api: Api<apps::v1::ReplicaSet> = Api::namespaced(client.to_owned(), &ns);
+    let replicaset_list = api
+      .list(&Default::default())
+      .await
+      .context("Failed to list ReplicaSets")?;
+
+    let replicasets: Vec<StdResource> = replicaset_list
+      .items
+      .iter()
+      .filter_map(|repl| match repl.metadata.owner_references {
+        None => {
+          let objmeta = repl.metadata.clone();
+
+          let metadata = StdMetadata {
+            name: objmeta.name.unwrap_or_default(),
+            namespace: objmeta.namespace.unwrap_or_default(),
+            kind: Kind::ReplicaSet,
+            labels: objmeta.labels.unwrap_or_default(),
+            annotations: objmeta.annotations.unwrap_or_default(),
+          };
+          let spec = match &repl.spec {
+            Some(spec) => StdSpec {
+              min_ready_seconds: spec.min_ready_seconds,
+              replicas: spec.replicas,
+              template: spec.template.clone(),
+            },
+            None => StdSpec {
+              min_ready_seconds: None,
+              replicas: None,
+              template: None,
+            },
+          };
+
+          Some(StdResource { metadata, spec })
+        }
+        Some(_) => None,
+      })
+      .collect();
+
+    all_replicasets.extend(replicasets);
+  }
+
+  Ok(all_replicasets)
 }
 
 async fn get_statefulsets(client: &Client) -> Result<Vec<StdResource>> {
